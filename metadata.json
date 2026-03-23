@@ -1,0 +1,5 @@
+{
+  "name": "3D Box Folding Simulator",
+  "description": "An interactive 3D application to demonstrate the folding process of a cardboard box using Three.js.",
+  "requestFramePermissions": []
+}
