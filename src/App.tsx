@@ -9,8 +9,9 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Box, Play, Pause, RotateCcw, Info, RefreshCw } from 'lucide-react';
 
 // --- Constants ---
-const CARDBOARD_COLOR = '#cdaa7d';
-const CARDBOARD_INSIDE_COLOR = '#b89b72';
+const CARDBOARD_COLOR = '#ffffff';
+const CARDBOARD_INSIDE_COLOR = '#f8f8f8';
+const CARDBOARD_STROKE_COLOR = '#e2e8f0';
 
 const BOX = {
   w: 10,
@@ -25,6 +26,16 @@ export default function App() {
   const [uiProgress, setUiProgress] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   
+  // 2D Canvas State
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [textureUrl, setTextureUrl] = useState<string | null>(null);
+  const [isSceneReady, setIsSceneReady] = useState(false);
+  const [imageLoadedTick, setImageLoadedTick] = useState(0);
+  const textureImageRef = useRef<HTMLImageElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isDragging = useRef(false);
+  const lastMousePos = useRef({ x: 0, y: 0 });
   const engine = useRef<{
     scene: THREE.Scene;
     renderer: THREE.WebGLRenderer;
@@ -33,105 +44,158 @@ export default function App() {
     playing: boolean;
   } | null>(null);
 
-  // --- 2D 刀模绘制逻辑 ---
+  // 预加载图片 Effect
   useEffect(() => {
-    if (!canvas2dRef.current) return;
+    if (textureUrl) {
+      const img = new Image();
+      img.src = textureUrl;
+      img.onload = () => {
+        textureImageRef.current = img;
+        setImageLoadedTick(t => t + 1); // 仅触发状态更新，不直接调用绘图
+      };
+      img.onerror = () => {
+        console.error("Failed to load image:", textureUrl);
+      };
+    } else {
+      textureImageRef.current = null;
+      setImageLoadedTick(t => t + 1);
+    }
+  }, [textureUrl]);
+
+  // --- 2D 刀模绘制逻辑 ---
+  const drawDieline = () => {
     const canvas = canvas2dRef.current;
-    const ctx = canvas.getContext('2d')!;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
     
-    const drawDieline = () => {
-      const w = canvas.width;
-      const h = canvas.height;
-      ctx.clearRect(0, 0, w, h);
+    // 基础缩放以适应画布
+    const totalW = BOX.w + BOX.d * 2;
+    const totalH = BOX.d * 2 + BOX.h * 2.8;
+    const baseScale = Math.min(w / totalW, h / totalH) * 0.8;
+    const finalScale = baseScale * zoom;
+    
+    ctx.save();
+    // 应用平移和缩放
+    ctx.translate(w / 2 + offset.x, h / 2 + offset.y);
+    ctx.scale(finalScale, finalScale);
+    // 整体向上偏移一点，因为顶盖比较长
+    ctx.translate(0, -BOX.h * 0.5);
+
+    // --- 1. 绘制贴图区域背景与边框 (辅助定位) ---
+    const fw = BOX.w;
+    const fh = BOX.h;
+    const fx = -BOX.w / 2;
+    const fy = -BOX.d / 2 - BOX.h;
+    
+    ctx.fillStyle = 'rgba(244, 63, 94, 0.03)'; 
+    ctx.fillRect(fx, fy, fw, fh);
+    ctx.strokeStyle = 'rgba(244, 63, 94, 0.2)';
+    ctx.lineWidth = 1 / finalScale;
+    ctx.strokeRect(fx, fy, fw, fh);
+
+    // --- 2. 绘制贴图 ---
+    if (textureImageRef.current) {
+      const img = textureImageRef.current;
+      const imgAspect = img.width / img.height;
+      const panelAspect = fw / fh;
+      let drawW, drawH;
+      if (imgAspect > panelAspect) {
+        drawW = fw;
+        drawH = fw / imgAspect;
+      } else {
+        drawH = fh;
+        drawW = fh * imgAspect;
+      }
+      ctx.drawImage(img, fx + (fw - drawW) / 2, fy + (fh - drawH) / 2, drawW, drawH);
+    }
+
+    const bleed = 0.3; // 出血线偏移量
+
+    // 线条样式定义
+    const styles = {
+      cut: { color: '#0000FF', width: 2, dash: [] },
+      crease: { color: '#FF0000', width: 1.5, dash: [0.15, 0.1] },
+      bleed: { color: '#00FF00', width: 1, dash: [] }
+    };
+
+    const drawRect = (x: number, y: number, rw: number, rh: number, type: 'cut' | 'crease' | 'bleed') => {
+      const s = styles[type];
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = s.width / finalScale;
+      ctx.setLineDash(s.dash);
+      ctx.strokeRect(x, y, rw, rh);
+    };
+
+    // 1. 绘制出血线 (外扩)
+    ctx.globalAlpha = 0.4;
+    drawRect(-BOX.w/2 - BOX.d - bleed, BOX.d/2 - bleed, BOX.w + BOX.d*2 + bleed*2, BOX.h + bleed*2, 'bleed');
+    drawRect(-BOX.w/2 - bleed, -BOX.d/2 - BOX.h - bleed, BOX.w + bleed*2, BOX.d*2 + BOX.h*2.8 + bleed*2, 'bleed');
+    ctx.globalAlpha = 1.0;
+
+    // 2. 绘制割线 (外轮廓)
+    drawRect(-BOX.w/2, -BOX.d/2, BOX.w, BOX.d, 'crease');
+    drawRect(-BOX.w/2, -BOX.d/2 - BOX.h, BOX.w, BOX.h, 'cut');
+    drawRect(-BOX.w/2, BOX.d/2, BOX.w, BOX.h, 'crease');
+    drawRect(-BOX.w/2 - BOX.d, BOX.d/2, BOX.d, BOX.h, 'cut');
+    drawRect(BOX.w/2, BOX.d/2, BOX.d, BOX.h, 'cut');
+    drawRect(-BOX.w/2, BOX.d/2 + BOX.h, BOX.w, BOX.d, 'crease');
+    drawRect(-BOX.w/2, BOX.d/2 + BOX.h + BOX.d, BOX.w, BOX.h * 0.8, 'cut');
+
+    ctx.restore();
+
+    // 绘制图例 (顶部一行展示)
+    const legendY = 80;
+    const legendSpacing = 160;
+    const items: { label: string, type: 'cut' | 'crease' | 'bleed' }[] = [
+      { label: 'Cut Line (割线)', type: 'cut' },
+      { label: 'Crease Line (折线)', type: 'crease' },
+      { label: 'Bleed Line (出血线)', type: 'bleed' }
+    ];
+    
+    const totalLegendWidth = items.length * legendSpacing;
+    const startX = (w - totalLegendWidth) / 2 + 20;
+
+    // 背景
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillRect(startX - 40, legendY - 20, totalLegendWidth + 40, 40);
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(startX - 40, legendY - 20, totalLegendWidth + 40, 40);
+
+    items.forEach((item, index) => {
+      const x = startX + index * legendSpacing;
+      const s = styles[item.type];
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 2;
+      const legendDash = s.dash.length > 0 ? s.dash.map(d => d * 40) : [];
+      ctx.setLineDash(legendDash);
+      ctx.beginPath();
+      ctx.moveTo(x, legendY);
+      ctx.lineTo(x + 30, legendY);
+      ctx.stroke();
       
-      // 自动缩放以适应画布
-      const totalW = BOX.w + BOX.d * 2;
-      const totalH = BOX.d * 2 + BOX.h * 2.8;
-      const scale = Math.min(w / totalW, h / totalH) * 0.8;
-      
-      ctx.save();
-      ctx.translate(w / 2, h / 2);
-      ctx.scale(scale, scale);
-      // 整体向上偏移一点，因为顶盖比较长
-      ctx.translate(0, -BOX.h * 0.5);
-
-      const bleed = 0.3; // 出血线偏移量
-
-      // 线条样式定义
-      const styles = {
-        cut: { color: '#ff0000', width: 2, dash: [] },
-        crease: { color: '#0000ff', width: 1.5, dash: [2, 1.5] },
-        bleed: { color: '#00ffff', width: 1, dash: [] }
-      };
-
-      const drawRect = (x: number, y: number, rw: number, rh: number, type: 'cut' | 'crease' | 'bleed') => {
-        const s = styles[type];
-        ctx.strokeStyle = s.color;
-        ctx.lineWidth = s.width / scale;
-        ctx.setLineDash(s.dash);
-        ctx.strokeRect(x, y, rw, rh);
-      };
-
-      // 1. 绘制出血线 (外扩)
-      ctx.globalAlpha = 0.4;
-      // 简化处理：绘制一个包含所有面板的大轮廓外扩
-      drawRect(-BOX.w/2 - BOX.d - bleed, BOX.d/2 - bleed, BOX.w + BOX.d*2 + bleed*2, BOX.h + bleed*2, 'bleed'); // 后壁+侧壁
-      drawRect(-BOX.w/2 - bleed, -BOX.d/2 - BOX.h - bleed, BOX.w + bleed*2, BOX.d*2 + BOX.h*2.8 + bleed*2, 'bleed'); // 主轴线
-      ctx.globalAlpha = 1.0;
-
-      // 2. 绘制割线 (外轮廓)
-      // 底座
-      drawRect(-BOX.w/2, -BOX.d/2, BOX.w, BOX.d, 'crease');
-      // 前壁
-      drawRect(-BOX.w/2, -BOX.d/2 - BOX.h, BOX.w, BOX.h, 'cut');
-      // 后壁
-      drawRect(-BOX.w/2, BOX.d/2, BOX.w, BOX.h, 'crease');
-      // 左侧壁 (连在后壁)
-      drawRect(-BOX.w/2 - BOX.d, BOX.d/2, BOX.d, BOX.h, 'cut');
-      // 右侧壁 (连在后壁)
-      drawRect(BOX.w/2, BOX.d/2, BOX.d, BOX.h, 'cut');
-      // 顶盖
-      drawRect(-BOX.w/2, BOX.d/2 + BOX.h, BOX.w, BOX.d, 'crease');
-      // 插口
-      drawRect(-BOX.w/2, BOX.d/2 + BOX.h + BOX.d, BOX.w, BOX.h * 0.8, 'cut');
-
-      // 3. 绘制折线 (内部连接处)
-      // 已经在上面用 'crease' 绘制了部分重叠区域
-      
-      ctx.restore();
-
-      // 绘制图例
-      const legendX = 30;
-      const legendY = h - 120;
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#64748b';
       ctx.font = '12px Inter';
       ctx.textAlign = 'left';
-      
-      const drawLegendItem = (y: number, label: string, type: 'cut' | 'crease' | 'bleed') => {
-        const s = styles[type];
-        ctx.strokeStyle = s.color;
-        ctx.lineWidth = 2;
-        ctx.setLineDash(s.dash);
-        ctx.beginPath();
-        ctx.moveTo(legendX, y - 5);
-        ctx.lineTo(legendX + 40, y - 5);
-        ctx.stroke();
-        ctx.fillStyle = '#64748b';
-        ctx.fillText(label, legendX + 50, y);
-      };
+      ctx.fillText(item.label, x + 40, legendY + 4);
+    });
+  };
 
-      ctx.fillStyle = 'rgba(255,255,255,0.9)';
-      ctx.fillRect(legendX - 10, legendY - 25, 150, 100);
-      ctx.strokeStyle = '#e2e8f0';
-      ctx.strokeRect(legendX - 10, legendY - 25, 150, 100);
-      
-      ctx.fillStyle = '#1e293b';
-      ctx.font = 'bold 12px Inter';
-      ctx.fillText('DIELINE LEGEND 图例', legendX, legendY - 5);
-      
-      drawLegendItem(legendY + 20, 'Cut Line (割线)', 'cut');
-      drawLegendItem(legendY + 45, 'Crease Line (折线)', 'crease');
-      drawLegendItem(legendY + 70, 'Bleed Line (出血线)', 'bleed');
-    };
+  // 2D 重绘 Effect
+  useEffect(() => {
+    drawDieline();
+  }, [zoom, offset, textureUrl, imageLoadedTick]);
+
+  // 2D 事件绑定 Effect (只运行一次)
+  useEffect(() => {
+    const canvas = canvas2dRef.current;
+    if (!canvas) return;
 
     const handleResize = () => {
       canvas.width = canvas.clientWidth;
@@ -139,9 +203,45 @@ export default function App() {
       drawDieline();
     };
 
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const delta = -e.deltaY;
+      const factor = delta > 0 ? 1.1 : 0.9;
+      setZoom(prev => Math.min(10, Math.max(0.1, prev * factor)));
+    };
+
+    const handleMouseDown = (e: MouseEvent) => {
+      isDragging.current = true;
+      lastMousePos.current = { x: e.clientX, y: e.clientY };
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging.current) return;
+      const dx = e.clientX - lastMousePos.current.x;
+      const dy = e.clientY - lastMousePos.current.y;
+      setOffset(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+      lastMousePos.current = { x: e.clientX, y: e.clientY };
+    };
+
+    const handleMouseUp = () => {
+      isDragging.current = false;
+    };
+
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    canvas.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
     window.addEventListener('resize', handleResize);
+    
     handleResize();
-    return () => window.removeEventListener('resize', handleResize);
+
+    return () => {
+      canvas.removeEventListener('wheel', handleWheel);
+      canvas.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('resize', handleResize);
+    };
   }, []);
 
   useEffect(() => {
@@ -176,8 +276,8 @@ export default function App() {
     const createCardboardPanel = (w: number, h: number) => {
       const material = new THREE.MeshStandardMaterial({ 
         color: CARDBOARD_COLOR,
-        roughness: 0.8,
-        metalness: 0.1,
+        roughness: 1.0, // 完全粗糙，减少反光感
+        metalness: 0.0, // 无金属感
         side: THREE.DoubleSide 
       });
 
@@ -282,6 +382,7 @@ export default function App() {
       progress: 0,
       playing: false
     };
+    setIsSceneReady(true);
 
     // 6. 渲染循环
     let lastTime = performance.now();
@@ -327,6 +428,8 @@ export default function App() {
     };
   }, []);
 
+  // 8. 3D 贴图逻辑已根据用户要求完全移除
+  
   // 操作接口
   const togglePlay = () => {
     if (engine.current) {
@@ -354,17 +457,78 @@ export default function App() {
     }
   };
 
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setTextureUrl(url);
+    }
+  };
+
+  const clearTexture = () => {
+    if (textureUrl) URL.revokeObjectURL(textureUrl);
+    setTextureUrl(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
   return (
     <div className="flex h-screen w-screen bg-slate-50 overflow-hidden font-sans text-slate-900">
       {/* Left: 2D Dieline (70%) */}
       <div className="w-[70%] h-full relative border-r border-slate-200 bg-white">
-        <div className="absolute top-6 left-8 z-10">
+        <div className="absolute top-6 left-8 z-10 flex items-center justify-between w-[calc(100%-4rem)]">
           <h1 className="text-xl font-black tracking-tight text-slate-800 flex items-center gap-2">
             <Box className="w-6 h-6 text-rose-500" />
             2D DIELINE VIEW <span className="text-xs font-normal text-slate-400 ml-2">Scale: 1:1 (Approx)</span>
           </h1>
+          
+          <div className="flex gap-3">
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              onChange={handleImageUpload} 
+              accept="image/*" 
+              className="hidden" 
+            />
+            <button 
+              onClick={() => fileInputRef.current?.click()}
+              className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all shadow-lg active:scale-95"
+            >
+              <Info className="w-4 h-4" />
+              UPLOAD ARTWORK 贴图
+            </button>
+            {textureUrl && (
+              <button 
+                onClick={clearTexture}
+                className="px-4 py-2 bg-rose-100 text-rose-600 rounded-xl text-xs font-bold hover:bg-rose-200 transition-all active:scale-95"
+              >
+                CLEAR
+              </button>
+            )}
+          </div>
         </div>
-        <canvas ref={canvas2dRef} className="w-full h-full" />
+        <canvas ref={canvas2dRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
+        <div className="absolute bottom-6 right-8 z-10 flex gap-2">
+          <button 
+            onClick={() => setZoom(prev => Math.min(10, prev * 1.2))}
+            className="w-10 h-10 flex items-center justify-center rounded-xl bg-white shadow-lg border border-slate-200 text-slate-600 hover:bg-slate-50 transition-all"
+          >
+            +
+          </button>
+          <button 
+            onClick={() => setZoom(prev => Math.max(0.1, prev / 1.2))}
+            className="w-10 h-10 flex items-center justify-center rounded-xl bg-white shadow-lg border border-slate-200 text-slate-600 hover:bg-slate-50 transition-all"
+          >
+            -
+          </button>
+          <button 
+            onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }}
+            className="px-4 h-10 flex items-center justify-center rounded-xl bg-white shadow-lg border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-all"
+          >
+            RESET
+          </button>
+        </div>
       </div>
 
       {/* Right: 3D Preview (30%) */}
